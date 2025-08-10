@@ -1,4 +1,4 @@
-use nabla_core::BuildSystem;
+use crate::core::BuildSystem;
 use std::path::Path;
 use tokio::fs;
 

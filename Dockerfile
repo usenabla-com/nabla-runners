@@ -45,26 +45,22 @@ RUN curl -L https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/
 ENV PATH="/opt/gcc-arm-none-eabi/bin:${PATH}"
 
 # Build the Rust runner binary
-WORKDIR /tmp/nabla-enterprise
+WORKDIR /tmp/nabla-runner
 
 # Copy only what's needed for the runner build
-COPY Cargo.toml Cargo.lock ./
-COPY crates/runner/Cargo.toml ./crates/runner/
-COPY crates/core/Cargo.toml ./crates/core/
-COPY api/Cargo.toml ./api/
+COPY Cargo.toml ./
+# Copy Cargo.lock if it exists (for reproducible builds)
+COPY Cargo.loc[k] ./
 
-# Create dummy main files to cache dependencies
-RUN mkdir -p crates/runner/src crates/core/src api/src && \
-    echo "fn main() {}" > crates/runner/src/main.rs && \
-    touch crates/core/src/lib.rs && \
-    touch api/src/lib.rs && \
+# Create dummy main file to cache dependencies
+RUN mkdir -p src && \
+    echo "fn main() {}" > src/main.rs && \
+    touch src/lib.rs && \
     cargo build --release --bin nabla-runner && \
-    rm -rf crates/runner/src crates/core/src api/src
+    rm -rf src
 
 # Now copy actual source code
-COPY crates/runner/src ./crates/runner/src
-COPY crates/core/src ./crates/core/src
-COPY api/src ./api/src
+COPY src ./src
 
 # Build the actual binary
 RUN cargo build --release --bin nabla-runner
@@ -74,7 +70,7 @@ RUN cp target/release/nabla-runner /usr/local/bin/nabla-runner && \
     chmod +x /usr/local/bin/nabla-runner
 
 # Cleanup build artifacts
-RUN rm -rf /tmp/nabla-enterprise
+RUN rm -rf /tmp/nabla-runner
 
 # Workspace
 RUN useradd -ms /bin/bash builder

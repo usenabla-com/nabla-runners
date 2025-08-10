@@ -89,7 +89,15 @@ fn validate_params(params: &BuildParams) -> Result<()> {
 }
 
 async fn setup_workspace() -> Result<std::path::PathBuf> {
-    let workspace = std::path::PathBuf::from("/workspace");
+    // Use /workspace in production (Docker/Linux), temp dir for local development
+    let workspace = if std::path::Path::new("/workspace").exists() {
+        std::path::PathBuf::from("/workspace")
+    } else {
+        // For local development, use a temp directory
+        let temp_base = std::env::temp_dir().join("nabla-workspace");
+        fs::create_dir_all(&temp_base).await?;
+        temp_base
+    };
     
     // Clean and create workspace directories
     let _ = fs::remove_dir_all(&workspace).await; // Ignore errors if doesn't exist

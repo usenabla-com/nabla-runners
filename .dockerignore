@@ -1,13 +1,31 @@
-target/
-Dockerfile
-.dockerignore
-.git/
+# Git
+.git
 .gitignore
+
+# Build artifacts
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
 *.md
-tests/
-benches/
-examples/
-.env
-.env.*
-*.log
-workspace/
+LICENSE
+
+# Tests (optional - include if you want to run tests in container)
+# tests/
+
+# GitHub
+.github/
+
+# Qodo
+.qodo/

@@ -1,4 +1,4 @@
-use nabla_core::{BuildResult, BuildSystem};
+use crate::core::{BuildResult, BuildSystem};
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

@@ -1,10 +1,11 @@
+pub mod core;
 pub mod detection;
 pub mod execution;
 pub mod server;
 
 use async_trait::async_trait;
 use anyhow::Result;
-use nabla_core::{BuildResult, BuildSystem};
+use crate::core::{BuildResult, BuildSystem};
 use std::path::Path;
 
 #[async_trait]
