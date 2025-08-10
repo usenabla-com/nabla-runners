@@ -1,13 +1,11 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    body::Bytes,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::Json,
     routing::post,
     Router,
 };
-use base64::{engine::general_purpose, Engine as _};
 use crate::{detection, execution};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -18,10 +16,10 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
-const MAX_UPLOAD_SIZE: usize = 200 * 1024 * 1024; // 200 MB
 
 #[derive(Debug, Deserialize)]
 struct BuildParams {
+    repo_url: String,
     owner: String,
     repo: String,
     head_sha: String,
@@ -61,7 +59,15 @@ fn validate_head_sha(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn validate_repo_url(url: &str) -> bool {
+    url.starts_with("https://github.com/") && url.len() > 19 && url.len() <= 200
+}
+
 fn validate_params(params: &BuildParams) -> Result<()> {
+    if !validate_repo_url(&params.repo_url) {
+        return Err(anyhow!("Invalid repo_url - must be a GitHub repository URL"));
+    }
+    
     if !validate_owner_repo(&params.owner) {
         return Err(anyhow!("Invalid owner"));
     }
@@ -108,61 +114,68 @@ async fn setup_workspace() -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-async fn extract_repository_from_base64(base64_data: &str, workspace: &Path) -> Result<std::path::PathBuf> {
-    // Decode base64 to get ZIP bytes
-    let zip_bytes = general_purpose::STANDARD.decode(base64_data)
-        .map_err(|e| anyhow!("Failed to decode base64 data: {}", e))?;
-
-    // Write ZIP bytes to temporary file
-    let temp_zip = workspace.join("temp_repo.zip");
-    fs::write(&temp_zip, zip_bytes).await?;
-
+async fn fetch_and_extract_repository(repo_url: &str, head_sha: &str, workspace: &Path) -> Result<std::path::PathBuf> {
+    // Extract owner/repo from GitHub URL
+    let url_parts: Vec<&str> = repo_url.trim_end_matches('/').split('/').collect();
+    if url_parts.len() < 5 {
+        return Err(anyhow!("Invalid GitHub repository URL format"));
+    }
+    
+    let owner = url_parts[url_parts.len() - 2];
+    let repo = url_parts[url_parts.len() - 1];
+    
+    // Use GitHub's archive API to get tarball - more efficient than zipball for shallow fetch
+    let archive_url = format!("https://github.com/{}/{}/archive/{}.tar.gz", owner, repo, head_sha);
+    
+    info!("Fetching repository archive from: {}", archive_url);
+    
+    // Fetch the archive
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&archive_url)
+        .header("User-Agent", "nabla-runner/0.1.0")
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Failed to fetch repository archive: HTTP {}",
+            response.status()
+        ));
+    }
+    
+    let archive_bytes = response.bytes().await?;
+    
+    // Write archive to temporary file
+    let temp_archive = workspace.join("temp_repo.tar.gz");
+    fs::write(&temp_archive, archive_bytes).await?;
+    
     let repo_dir = workspace.join("repo");
     fs::create_dir_all(&repo_dir).await?;
-
-    // Extract ZIP using unzip command
-    let output = Command::new("unzip")
-        .arg("-q")
-        .arg(&temp_zip)
-        .arg("-d")
+    
+    // Extract tarball using tar command
+    let output = Command::new("tar")
+        .arg("-xzf")
+        .arg(&temp_archive)
+        .arg("-C")
         .arg(&repo_dir)
+        .arg("--strip-components=1")  // Remove the top-level directory from archive
         .output()
         .await?;
-
+    
     if !output.status.success() {
         return Err(anyhow!(
-            "Failed to extract ZIP: {}",
+            "Failed to extract tar.gz: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-
-    // Clean up temporary ZIP file
-    let _ = fs::remove_file(&temp_zip).await;
-
-    // Handle nested directory structure (common with GitHub archives)
-    let final_repo_dir = find_actual_repo_dir(&repo_dir).await?;
     
-    Ok(final_repo_dir)
+    // Clean up temporary archive file
+    let _ = fs::remove_file(&temp_archive).await;
+    
+    Ok(repo_dir)
 }
 
-async fn find_actual_repo_dir(repo_dir: &Path) -> Result<std::path::PathBuf> {
-    let mut entries = fs::read_dir(repo_dir).await?;
-    let mut dirs = Vec::new();
-    
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.path().is_dir() {
-            dirs.push(entry.path());
-        }
-    }
-
-    // If there's exactly one directory, it's likely the actual repo content
-    if dirs.len() == 1 {
-        Ok(dirs[0].clone())
-    } else {
-        // Multiple directories or files at root level, use the extraction directory
-        Ok(repo_dir.to_path_buf())
-    }
-}
 
 async fn package_artifact(artifact_path: &str, workspace: &Path) -> Result<std::path::PathBuf> {
     let artifact_path = Path::new(artifact_path);
@@ -237,41 +250,7 @@ async fn upload_artifact(zip_path: &Path, params: &BuildParams) -> Result<()> {
 async fn build_handler(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<BuildParams>,
-    headers: HeaderMap,
-    body: Bytes,
 ) -> Result<Json<BuildResponse>, (StatusCode, Json<BuildResponse>)> {
-    // Validate content type
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    
-    let is_base64 = content_type.starts_with("application/base64") || content_type.starts_with("text/plain");
-    let is_zip = content_type.starts_with("application/zip") || content_type.starts_with("application/octet-stream");
-    
-    if !is_base64 && !is_zip {
-        return Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(BuildResponse {
-                status: "error".to_string(),
-                output: None,
-                error: Some("unsupported media type - use application/zip or application/base64".to_string()),
-            }),
-        ));
-    }
-
-    // Validate size
-    if body.len() > MAX_UPLOAD_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(BuildResponse {
-                status: "error".to_string(),
-                output: None,
-                error: Some("payload too large".to_string()),
-            }),
-        ));
-    }
-
     // Validate parameters
     if let Err(e) = validate_params(&params) {
         return Err((
@@ -284,28 +263,10 @@ async fn build_handler(
         ));
     }
 
-    info!("Build request: {}/{} @ {}", params.owner, params.repo, params.head_sha);
-
-    // Process repository data
-    let repo_data_base64 = if is_base64 {
-        // Data is already BASE64 encoded
-        String::from_utf8(body.to_vec()).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(BuildResponse {
-                    status: "error".to_string(),
-                    output: None,
-                    error: Some(format!("invalid UTF-8 in base64 data: {}", e)),
-                }),
-            )
-        })?
-    } else {
-        // ZIP bytes - need to encode to BASE64
-        general_purpose::STANDARD.encode(&body)
-    };
+    info!("Build request: {} @ {}", params.repo_url, params.head_sha);
 
     // Execute build
-    match execute_build_pipeline(&repo_data_base64, &params).await {
+    match execute_build_pipeline(&params).await {
         Ok(output) => Ok(Json(BuildResponse {
             status: "accepted".to_string(),
             output: Some(output),
@@ -325,16 +286,16 @@ async fn build_handler(
     }
 }
 
-async fn execute_build_pipeline(repo_data_base64: &str, params: &BuildParams) -> Result<String> {
+async fn execute_build_pipeline(params: &BuildParams) -> Result<String> {
     let mut output_log = Vec::new();
     
     // Setup workspace
     let workspace = setup_workspace().await?;
     output_log.push(format!("Workspace ready: {}", workspace.display()));
 
-    // Extract repository from base64 data
-    let repo_dir = extract_repository_from_base64(repo_data_base64, &workspace).await?;
-    output_log.push(format!("Repository extracted to: {}", repo_dir.display()));
+    // Fetch and extract repository from GitHub
+    let repo_dir = fetch_and_extract_repository(&params.repo_url, &params.head_sha, &workspace).await?;
+    output_log.push(format!("Repository fetched and extracted to: {}", repo_dir.display()));
 
     // Detect build system
     let build_system = detection::detect_build_system(&repo_dir).await

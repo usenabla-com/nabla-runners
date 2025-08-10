@@ -3,9 +3,6 @@ use std::path::Path;
 use tokio::fs;
 
 pub async fn detect_build_system(path: &Path) -> Option<BuildSystem> {
-    if path.join("Cargo.toml").exists() {
-        return Some(BuildSystem::Cargo);
-    }
 
     if path.join("Makefile").exists() || path.join("makefile").exists() {
         return Some(BuildSystem::Makefile);

@@ -130,59 +130,6 @@ async fn find_binary_by_patterns(dir: &Path, patterns: &[&str]) -> Result<PathBu
     find_executable_in_dir(dir).await
 }
 
-/// Parse Cargo.toml to get the binary name
-async fn get_cargo_binary_name(path: &Path) -> Result<String> {
-    let cargo_toml = path.join("Cargo.toml");
-    if !cargo_toml.exists() {
-        return Err(anyhow!("Cargo.toml not found"));
-    }
-    
-    let content = fs::read_to_string(&cargo_toml).await?;
-    
-    // Simple parsing - look for [[bin]] or package name
-    for line in content.lines() {
-        if line.starts_with("name = ") {
-            if let Some(name) = line.split('"').nth(1) {
-                return Ok(name.to_string());
-            }
-        }
-    }
-    
-    // Default to directory name
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("Could not determine binary name"))
-}
-
-async fn build_cargo(path: &Path) -> Result<(String, String)> {
-    let output = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .current_dir(path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(anyhow!("Cargo build failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-
-    // Try to find the actual binary
-    let target_dir = path.join("target/release");
-    
-    // Get binary name from Cargo.toml
-    let binary_name = get_cargo_binary_name(path).await.unwrap_or_else(|_| "firmware".to_string());
-    
-    // Look for the binary
-    let binary_path = find_binary_by_patterns(&target_dir, &[&binary_name, "main", "firmware"])
-        .await
-        .map_err(|_| anyhow!("Could not find built binary in target/release"))?;
-    
-    Ok((binary_path.to_string_lossy().to_string(), "elf".to_string()))
-}
-
 async fn build_makefile(path: &Path) -> Result<(String, String)> {
     // First, try to get the output name from make (for future enhancement)
     let _dry_run = Command::new("make")

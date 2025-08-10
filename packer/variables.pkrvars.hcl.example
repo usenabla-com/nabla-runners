@@ -1,0 +1,14 @@
+# GCP Configuration
+project_id = "your-gcp-project-id"
+zone       = "us-central1-a"
+
+# Image Configuration
+image_name   = "nabla-runner"
+image_family = "nabla-runner"
+
+# Source Configuration
+github_repo   = "https://github.com/jdbohrman/nabla-runners.git"
+github_branch = "main"
+
+# Build Configuration
+machine_type = "e2-medium"  # Machine type for building the image
