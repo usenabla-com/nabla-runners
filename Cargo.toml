@@ -1,0 +1,37 @@
+[package]
+name = "nabla-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nabla-runner"
+path = "src/main.rs"
+
+[dependencies]
+nabla-core = { path = "../core" }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+uuid = { workspace = true }
+async-trait = "0.1"
+reqwest = { version = "0.11", features = ["stream"] }
+urlencoding = "2.1"
+base64 = "0.21"
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["cors"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+zip = "0.6"
+walkdir = "2.3"
+base64 = "0.21"
+
+[[test]]
+name = "runner_tests"
+path = "tests/runner_tests.rs"

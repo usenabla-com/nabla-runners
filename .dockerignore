@@ -1,0 +1,13 @@
+target/
+Dockerfile
+.dockerignore
+.git/
+.gitignore
+*.md
+tests/
+benches/
+examples/
+.env
+.env.*
+*.log
+workspace/
