@@ -14,8 +14,10 @@ use tokio::fs;
 use tokio::process::Command;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+use std::env;
+use std::collections::HashSet;
 
 
 #[derive(Debug, Deserialize, Clone)]
@@ -49,6 +51,8 @@ struct JobStatusResponse {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    customer_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,15 +60,60 @@ struct JobListResponse {
     jobs: Vec<JobStatusResponse>,
 }
 
+#[derive(Debug, Clone)]
+struct CustomerConfig {
+    customer_id: String,
+    allowed_installation_ids: HashSet<String>,
+}
+
+impl CustomerConfig {
+    fn from_env() -> Self {
+        let customer_id = env::var("CUSTOMER_ID").unwrap_or_else(|_| "default".to_string());
+        
+        let installation_ids = env::var("ALLOWED_INSTALLATION_IDS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .collect::<HashSet<_>>();
+
+        info!("Customer config initialized: customer_id={}, allowed_installations={:?}", 
+              customer_id, installation_ids);
+
+        Self {
+            customer_id,
+            allowed_installation_ids: installation_ids,
+        }
+    }
+
+    fn validate_installation_id(&self, installation_id: &str) -> bool {
+        // If no specific installations configured, allow all (backward compatibility)
+        if self.allowed_installation_ids.is_empty() {
+            warn!("No ALLOWED_INSTALLATION_IDS configured - allowing all installation IDs");
+            return true;
+        }
+        
+        let is_allowed = self.allowed_installation_ids.contains(installation_id);
+        
+        if !is_allowed {
+            warn!("Installation ID {} not allowed for customer {}", installation_id, self.customer_id);
+        }
+        
+        is_allowed
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     job_manager: JobManager,
+    customer_config: CustomerConfig,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             job_manager: JobManager::new(),
+            customer_config: CustomerConfig::from_env(),
         }
     }
 }
@@ -101,22 +150,23 @@ fn validate_params(params: &BuildParams) -> Result<()> {
 }
 
 async fn setup_workspace() -> Result<std::path::PathBuf> {
-    // Use /workspace in production (Docker/Linux), temp dir for local development
+    // Create unique workspace per job to avoid conflicts
+    let job_id = Uuid::new_v4();
+    
     let workspace = if std::path::Path::new("/workspace").exists() {
-        std::path::PathBuf::from("/workspace")
+        std::path::PathBuf::from("/workspace").join(format!("job-{}", job_id))
     } else {
         // For local development, use a temp directory
         let temp_base = std::env::temp_dir().join("nabla-workspace");
-        fs::create_dir_all(&temp_base).await?;
-        temp_base
+        temp_base.join(format!("job-{}", job_id))
     };
     
-    // Clean and create workspace directories
-    let _ = fs::remove_dir_all(&workspace).await; // Ignore errors if doesn't exist
+    // Create workspace directories
     fs::create_dir_all(&workspace).await?;
     fs::create_dir_all(workspace.join("build")).await?;
     fs::create_dir_all(workspace.join("out")).await?;
 
+    info!("Created workspace: {}", workspace.display());
     Ok(workspace)
 }
 
@@ -256,7 +306,21 @@ async fn build_handler(
         ));
     }
 
-    info!("Build request: {}/{} from {}", params.owner, params.repo, params.archive_url);
+    // Validate installation ID for this customer
+    if !state.customer_config.validate_installation_id(&params.installation_id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(BuildResponse {
+                status: "error".to_string(),
+                job_id: Uuid::nil(),
+                message: format!("Installation ID {} not allowed for this customer", params.installation_id),
+            }),
+        ));
+    }
+
+    info!("Build request: {}/{} from {} (installation: {}, customer: {})", 
+          params.owner, params.repo, params.archive_url, 
+          params.installation_id, state.customer_config.customer_id);
 
     // Create new job
     let job = BuildJob::new(
@@ -265,6 +329,7 @@ async fn build_handler(
         params.repo.clone(),
         params.installation_id.clone(),
         params.upload_url.clone(),
+        Some(state.customer_config.customer_id.clone()),
     );
 
     let job_id = job.id;
@@ -314,6 +379,7 @@ async fn job_status_handler(
             output: job.output,
             error: job.error,
             artifact_path: job.artifact_path,
+            customer_name: job.customer_name,
         })),
         None => Err((
             StatusCode::NOT_FOUND,
@@ -340,6 +406,7 @@ async fn job_list_handler(
             output: job.output,
             error: job.error,
             artifact_path: job.artifact_path,
+            customer_name: job.customer_name,
         })
         .collect();
 
@@ -368,25 +435,40 @@ async fn job_cancel_handler(
 }
 
 async fn execute_build_task(job_manager: JobManager, job_id: Uuid, params: BuildParams) {
+    let mut workspace_to_cleanup: Option<std::path::PathBuf> = None;
+    
     match execute_build_pipeline(&params).await {
-        Ok((output, artifact_path)) => {
+        Ok((output, artifact_path, workspace)) => {
             // Build succeeded
+            workspace_to_cleanup = Some(workspace);
             let _ = job_manager.update_job(&job_id, |job| {
                 job.complete(output, Some(artifact_path));
             });
         }
         Err(e) => {
-            // Build failed
+            // Build failed - try to extract workspace for cleanup
             let error_msg = e.to_string();
             error!("Build job {} failed: {}", job_id, error_msg);
+            
+            // Try to extract workspace path from error context for cleanup
+            workspace_to_cleanup = get_workspace_for_cleanup().await;
+            
             let _ = job_manager.update_job(&job_id, |job| {
                 job.fail(error_msg);
             });
         }
     }
+    
+    // Always cleanup workspace after job completes
+    if let Some(workspace) = workspace_to_cleanup {
+        cleanup_workspace(&workspace).await;
+    }
+    
+    // Additional system cleanup
+    cleanup_system_temp().await;
 }
 
-async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String)> {
+async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String, std::path::PathBuf)> {
     let mut output_log = Vec::new();
     
     // Setup workspace
@@ -432,7 +514,67 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String)
         full_output
     };
 
-    Ok((tail, artifact_path))
+    Ok((tail, artifact_path, workspace))
+}
+
+async fn get_workspace_for_cleanup() -> Option<std::path::PathBuf> {
+    // Try to determine workspace path for cleanup even when build fails
+    let workspace = if std::path::Path::new("/workspace").exists() {
+        std::path::PathBuf::from("/workspace")
+    } else {
+        std::env::temp_dir().join("nabla-workspace")
+    };
+    
+    if workspace.exists() {
+        Some(workspace)
+    } else {
+        None
+    }
+}
+
+async fn cleanup_workspace(workspace: &Path) {
+    info!("Cleaning up workspace: {}", workspace.display());
+    if let Err(e) = fs::remove_dir_all(workspace).await {
+        error!("Failed to cleanup workspace {}: {}", workspace.display(), e);
+    } else {
+        info!("Workspace cleaned up successfully: {}", workspace.display());
+    }
+}
+
+async fn cleanup_system_temp() {
+    info!("Performing system cleanup...");
+    
+    let cleanup_paths = vec![
+        "/tmp/nabla-*",
+        "/tmp/pio-*",
+        "/tmp/platformio-*",
+        "/tmp/cc*",
+        "/tmp/tmp*",
+    ];
+    
+    for pattern in cleanup_paths {
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!("rm -rf {}", pattern))
+            .output()
+            .await;
+    }
+    
+    // Clean PlatformIO cache if it's getting too large (keep last 1GB)
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg("find /root/.platformio/.cache -type f -atime +1 -delete")
+        .output()
+        .await;
+    
+    // Clean old build directories in workspace
+    let _ = Command::new("sh")
+        .arg("-c") 
+        .arg("find /workspace -maxdepth 1 -type d -mtime +1 -exec rm -rf {} \\; 2>/dev/null || true")
+        .output()
+        .await;
+        
+    info!("System cleanup completed");
 }
 
 async fn health_handler() -> Json<serde_json::Value> {

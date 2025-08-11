@@ -26,6 +26,7 @@ pub struct BuildJob {
     pub owner: String,
     pub repo: String,
     pub installation_id: String,
+    pub customer_name: Option<String>,
     pub upload_url: String,
     pub output: Option<String>,
     pub error: Option<String>,
@@ -39,6 +40,7 @@ impl BuildJob {
         repo: String,
         installation_id: String,
         upload_url: String,
+        customer_name: Option<String>,
     ) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -55,6 +57,7 @@ impl BuildJob {
             owner,
             repo,
             installation_id,
+            customer_name,
             upload_url,
             output: None,
             error: None,
