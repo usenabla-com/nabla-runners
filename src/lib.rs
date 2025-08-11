@@ -1,7 +1,6 @@
 pub mod core;
 pub mod detection;
 pub mod execution;
-pub mod intelligent_build;
 pub mod server;
 
 use async_trait::async_trait;

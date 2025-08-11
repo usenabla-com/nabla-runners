@@ -1,5 +1,4 @@
 use crate::core::{BuildResult, BuildSystem};
-use crate::intelligent_build::{IntelligentBuilder, BuildFixDatabase};
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -7,19 +6,16 @@ use tokio::process::Command;
 use std::time::Instant;
 use tokio::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::collections::HashMap;
 
 pub async fn execute_build(path: &Path, system: BuildSystem) -> Result<BuildResult> {
-    let intelligent_builder = create_intelligent_builder().await;
-    intelligent_builder.execute_with_fallbacks(path, system).await
-}
-
-async fn create_intelligent_builder() -> IntelligentBuilder {
-    let fix_db = BuildFixDatabase {
-        error_patterns: HashMap::new(),
-        successful_configs: HashMap::new(),
-    };
-    IntelligentBuilder::new(fix_db)
+    match system {
+        BuildSystem::PlatformIO => build_platformio_original(path).await,
+        BuildSystem::CMake => build_cmake_original(path).await,
+        BuildSystem::Makefile => build_makefile_original(path).await,
+        BuildSystem::ZephyrWest => build_zephyr_original(path).await,
+        BuildSystem::STM32CubeIDE => build_stm32_original(path).await,
+        BuildSystem::SCons => build_scons_original(path).await,
+    }
 }
 
 fn create_build_result(output_path: String, target_format: String, build_system: BuildSystem, start_time: Instant) -> BuildResult {

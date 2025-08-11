@@ -26,10 +26,17 @@ apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
+    python3-setuptools \
+    python3-wheel \
     device-tree-compiler \
     file \
     unzip \
-    zip
+    zip \
+    nodejs \
+    npm \
+    ca-certificates \
+    wget
 
 # Install Rust
 if ! command -v cargo &> /dev/null; then
@@ -45,7 +52,13 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Install Python tools
+pip3 install --break-system-packages --upgrade pip setuptools wheel
 pip3 install --break-system-packages platformio west scons
+
+# Update PlatformIO and install common platforms
+pio upgrade
+pio platform install espressif32
+pio platform install atmelavr
 
 # Install ARM toolchain for STM32 and similar
 if [ ! -d "/opt/gcc-arm-none-eabi" ]; then
@@ -67,7 +80,7 @@ if [ -d "nabla-runners" ]; then
     git pull origin main
 else
     echo "Cloning repository..."
-    git clone "https://github.com/usenabla-com/nabla-runners.git"
+    git clone "https://github.com/usenabla-com/nabla-runners"
     cd nabla-runners
     git checkout main
 fi

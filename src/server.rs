@@ -14,6 +14,8 @@ use tokio::fs;
 use tokio::process::Command;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
+use std::time::Duration;
 use tracing::{error, info};
 
 
@@ -321,6 +323,7 @@ pub fn create_app() -> Router {
         .route("/health", axum::routing::get(health_handler))
         .layer(
             ServiceBuilder::new()
+                .layer(TimeoutLayer::new(Duration::from_secs(600))) // 10 minute timeout
                 .layer(CorsLayer::permissive())
                 .into_inner(),
         )
