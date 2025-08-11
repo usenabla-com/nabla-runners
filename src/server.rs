@@ -19,7 +19,9 @@ use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
 struct BuildParams {
-    repo_url: String,
+    archive_url: String,
+    owner: String,
+    repo: String,
     installation_id: String,
     upload_url: String,
 }
@@ -44,13 +46,21 @@ impl Default for AppState {
     }
 }
 
-fn validate_repo_url(url: &str) -> bool {
-    url.starts_with("https://github.com/") && url.len() > 19 && url.len() <= 200
+fn validate_archive_url(url: &str) -> bool {
+    url.starts_with("https://") && url.len() > 8 && url.len() <= 500
 }
 
 fn validate_params(params: &BuildParams) -> Result<()> {
-    if !validate_repo_url(&params.repo_url) {
-        return Err(anyhow!("Invalid repo_url - must be a GitHub repository URL"));
+    if !validate_archive_url(&params.archive_url) {
+        return Err(anyhow!("Invalid archive_url - must be a valid HTTPS URL"));
+    }
+    
+    if params.owner.is_empty() || params.owner.len() > 100 {
+        return Err(anyhow!("Invalid owner - must be 1-100 characters"));
+    }
+    
+    if params.repo.is_empty() || params.repo.len() > 100 {
+        return Err(anyhow!("Invalid repo - must be 1-100 characters"));
     }
     
     let installation_id: u64 = params.installation_id.parse()
@@ -87,25 +97,13 @@ async fn setup_workspace() -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-async fn fetch_and_extract_repository(repo_url: &str, workspace: &Path) -> Result<std::path::PathBuf> {
-    // Extract owner/repo from GitHub URL
-    let url_parts: Vec<&str> = repo_url.trim_end_matches('/').split('/').collect();
-    if url_parts.len() < 5 {
-        return Err(anyhow!("Invalid GitHub repository URL format"));
-    }
-    
-    let owner = url_parts[url_parts.len() - 2];
-    let repo = url_parts[url_parts.len() - 1];
-    
-    // Use GitHub's archive API to get tarball from main branch
-    let archive_url = format!("https://github.com/{}/{}/archive/main.tar.gz", owner, repo);
-    
+async fn fetch_and_extract_repository(archive_url: &str, workspace: &Path) -> Result<std::path::PathBuf> {
     info!("Fetching repository archive from: {}", archive_url);
     
     // Fetch the archive
     let client = reqwest::Client::new();
     let response = client
-        .get(&archive_url)
+        .get(archive_url)
         .header("User-Agent", "nabla-runner/0.1.0")
         .send()
         .await?;
@@ -181,18 +179,9 @@ async fn package_artifact(artifact_path: &str, workspace: &Path) -> Result<std::
 }
 
 async fn upload_artifact(zip_path: &Path, params: &BuildParams) -> Result<()> {
-    // Extract owner/repo from GitHub URL
-    let url_parts: Vec<&str> = params.repo_url.trim_end_matches('/').split('/').collect();
-    if url_parts.len() < 5 {
-        return Err(anyhow!("Invalid GitHub repository URL format"));
-    }
-    
-    let owner = url_parts[url_parts.len() - 2];
-    let repo = url_parts[url_parts.len() - 1];
-    
     // URL encode parameters
-    let owner_encoded = urlencoding::encode(owner);
-    let repo_encoded = urlencoding::encode(repo);
+    let owner_encoded = urlencoding::encode(&params.owner);
+    let repo_encoded = urlencoding::encode(&params.repo);
     let installation_id = urlencoding::encode(&params.installation_id);
 
     let upload_url = format!(
@@ -244,7 +233,7 @@ async fn build_handler(
         ));
     }
 
-    info!("Build request: {}", params.repo_url);
+    info!("Build request: {}/{} from {}", params.owner, params.repo, params.archive_url);
 
     // Execute build
     match execute_build_pipeline(&params).await {
@@ -274,8 +263,8 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<String> {
     let workspace = setup_workspace().await?;
     output_log.push(format!("Workspace ready: {}", workspace.display()));
 
-    // Fetch and extract repository from GitHub
-    let repo_dir = fetch_and_extract_repository(&params.repo_url, &workspace).await?;
+    // Fetch and extract repository from archive URL
+    let repo_dir = fetch_and_extract_repository(&params.archive_url, &workspace).await?;
     output_log.push(format!("Repository fetched and extracted to: {}", repo_dir.display()));
 
     // Detect build system

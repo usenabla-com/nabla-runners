@@ -38,9 +38,9 @@ The Docker image includes:
 - `text/plain` - BASE64-encoded ZIP file (alternative)
 
 #### Query Parameters:
+- `archive_url` (required) - URL to repository archive (tar.gz)
 - `owner` (required) - Repository owner
 - `repo` (required) - Repository name  
-- `head_sha` (required) - Git commit SHA
 - `installation_id` (required) - GitHub App installation ID
 - `upload_url` (required) - URL to upload build artifacts
 
@@ -48,7 +48,7 @@ The Docker image includes:
 
 **ZIP Upload:**
 ```bash
-curl -X POST "http://localhost:8080/build?owner=myorg&repo=firmware&head_sha=abc123&installation_id=12345&upload_url=https://api.example.com/upload" \
+curl -X POST "http://localhost:8080/build?archive_url=https://github.com/myorg/firmware/archive/abc123.tar.gz&owner=myorg&repo=firmware&installation_id=12345&upload_url=https://api.example.com/upload" \
   -H "Content-Type: application/zip" \
   --data-binary @repo.zip
 ```
@@ -58,7 +58,7 @@ curl -X POST "http://localhost:8080/build?owner=myorg&repo=firmware&head_sha=abc
 # First encode your ZIP file
 base64 repo.zip > repo.b64
 
-curl -X POST "http://localhost:8080/build?owner=myorg&repo=firmware&head_sha=abc123&installation_id=12345&upload_url=https://api.example.com/upload" \
+curl -X POST "http://localhost:8080/build?archive_url=https://github.com/myorg/firmware/archive/abc123.tar.gz&owner=myorg&repo=firmware&installation_id=12345&upload_url=https://api.example.com/upload" \
   -H "Content-Type: application/base64" \
   --data-binary @repo.b64
 ```
