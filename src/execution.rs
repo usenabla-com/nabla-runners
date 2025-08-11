@@ -11,7 +11,6 @@ pub async fn execute_build(path: &Path, system: BuildSystem) -> Result<BuildResu
     let start_time = Instant::now();
     
     let result = match system {
-        BuildSystem::Cargo => build_cargo(path).await,
         BuildSystem::Makefile => build_makefile(path).await,
         BuildSystem::CMake => build_cmake(path).await,
         BuildSystem::PlatformIO => build_platformio(path).await,
