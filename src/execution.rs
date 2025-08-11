@@ -1,4 +1,5 @@
 use crate::core::{BuildResult, BuildSystem};
+use crate::intelligent_build::{IntelligentBuilder, BuildFixDatabase};
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -6,38 +7,29 @@ use tokio::process::Command;
 use std::time::Instant;
 use tokio::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::collections::HashMap;
 
 pub async fn execute_build(path: &Path, system: BuildSystem) -> Result<BuildResult> {
-    let start_time = Instant::now();
-    
-    let result = match system {
-        BuildSystem::Makefile => build_makefile(path).await,
-        BuildSystem::CMake => build_cmake(path).await,
-        BuildSystem::PlatformIO => build_platformio(path).await,
-        BuildSystem::ZephyrWest => build_zephyr(path).await,
-        BuildSystem::STM32CubeIDE => build_stm32(path).await,
-        BuildSystem::SCons => build_scons(path).await,
+    let intelligent_builder = create_intelligent_builder().await;
+    intelligent_builder.execute_with_fallbacks(path, system).await
+}
+
+async fn create_intelligent_builder() -> IntelligentBuilder {
+    let fix_db = BuildFixDatabase {
+        error_patterns: HashMap::new(),
+        successful_configs: HashMap::new(),
     };
+    IntelligentBuilder::new(fix_db)
+}
 
-    let duration_ms = start_time.elapsed().as_millis() as u64;
-
-    match result {
-        Ok((output_path, target_format)) => Ok(BuildResult {
-            success: true,
-            output_path: Some(output_path),
-            target_format: Some(target_format),
-            error_output: None,
-            build_system: system,
-            duration_ms,
-        }),
-        Err(error) => Ok(BuildResult {
-            success: false,
-            output_path: None,
-            target_format: None,
-            error_output: Some(error.to_string()),
-            build_system: system,
-            duration_ms,
-        }),
+fn create_build_result(output_path: String, target_format: String, build_system: BuildSystem, start_time: Instant) -> BuildResult {
+    BuildResult {
+        success: true,
+        output_path: Some(output_path),
+        target_format: Some(target_format),
+        error_output: None,
+        build_system,
+        duration_ms: start_time.elapsed().as_millis() as u64,
     }
 }
 
@@ -129,7 +121,8 @@ async fn find_binary_by_patterns(dir: &Path, patterns: &[&str]) -> Result<PathBu
     find_executable_in_dir(dir).await
 }
 
-async fn build_makefile(path: &Path) -> Result<(String, String)> {
+pub async fn build_makefile_original(path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     // First, try to get the output name from make (for future enhancement)
     let _dry_run = Command::new("make")
         .arg("-n")
@@ -163,10 +156,11 @@ async fn build_makefile(path: &Path) -> Result<(String, String)> {
         .await
         .map_err(|_| anyhow!("Could not find built binary after make"))?;
     
-    Ok((binary_path.to_string_lossy().to_string(), "bin".to_string()))
+    Ok(create_build_result(binary_path.to_string_lossy().to_string(), "bin".to_string(), BuildSystem::Makefile, start_time))
 }
 
-async fn build_cmake(path: &Path) -> Result<(String, String)> {
+pub async fn build_cmake_original(path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     let build_dir = path.join("build");
     tokio::fs::create_dir_all(&build_dir).await?;
 
@@ -206,10 +200,11 @@ async fn build_cmake(path: &Path) -> Result<(String, String)> {
         .await
         .map_err(|_| anyhow!("Could not find built binary in CMake build directory"))?;
     
-    Ok((binary_path.to_string_lossy().to_string(), "elf".to_string()))
+    Ok(create_build_result(binary_path.to_string_lossy().to_string(), "elf".to_string(), BuildSystem::CMake, start_time))
 }
 
-async fn build_platformio(path: &Path) -> Result<(String, String)> {
+pub async fn build_platformio_original(path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     let output = Command::new("pio")
         .arg("run")
         .current_dir(path)
@@ -237,7 +232,7 @@ async fn build_platformio(path: &Path) -> Result<(String, String)> {
                     let firmware_path = env_path.join(format!("{}{}", pattern, ext));
                     if firmware_path.exists() && firmware_path.is_file() {
                         let format = ext.trim_start_matches('.').to_string();
-                        return Ok((firmware_path.to_string_lossy().to_string(), format));
+                        return Ok(create_build_result(firmware_path.to_string_lossy().to_string(), format, BuildSystem::PlatformIO, start_time));
                     }
                 }
             }
@@ -247,7 +242,8 @@ async fn build_platformio(path: &Path) -> Result<(String, String)> {
     Err(anyhow!("Could not find PlatformIO build output"))
 }
 
-async fn build_zephyr(path: &Path) -> Result<(String, String)> {
+pub async fn build_zephyr_original(path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     let output = Command::new("west")
         .arg("build")
         .current_dir(path)
@@ -263,7 +259,7 @@ async fn build_zephyr(path: &Path) -> Result<(String, String)> {
     // Zephyr puts the binary in build/zephyr/zephyr.elf
     let zephyr_elf = path.join("build/zephyr/zephyr.elf");
     if zephyr_elf.exists() && zephyr_elf.is_file() {
-        return Ok((zephyr_elf.to_string_lossy().to_string(), "elf".to_string()));
+        return Ok(create_build_result(zephyr_elf.to_string_lossy().to_string(), "elf".to_string(), BuildSystem::ZephyrWest, start_time));
     }
     
     // Alternative locations
@@ -280,14 +276,15 @@ async fn build_zephyr(path: &Path) -> Result<(String, String)> {
                 .and_then(|e| e.to_str())
                 .unwrap_or("bin")
                 .to_string();
-            return Ok((alt_path.to_string_lossy().to_string(), format));
+            return Ok(create_build_result(alt_path.to_string_lossy().to_string(), format, BuildSystem::ZephyrWest, start_time));
         }
     }
     
     Err(anyhow!("Could not find Zephyr build output"))
 }
 
-async fn build_stm32(_path: &Path) -> Result<(String, String)> {
+pub async fn build_stm32_original(_path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     // STM32CubeIDE typically requires IDE integration
     // However, if using STM32CubeMX with Makefile generation:
     
@@ -318,7 +315,7 @@ async fn build_stm32(_path: &Path) -> Result<(String, String)> {
                 };
                 
                 if let Ok(binary) = find_executable_in_dir(&search_path).await {
-                    return Ok((binary.to_string_lossy().to_string(), "elf".to_string()));
+                    return Ok(create_build_result(binary.to_string_lossy().to_string(), "elf".to_string(), BuildSystem::STM32CubeIDE, start_time));
                 }
             }
         }
@@ -327,7 +324,8 @@ async fn build_stm32(_path: &Path) -> Result<(String, String)> {
     Err(anyhow!("STM32CubeIDE build not implemented - requires IDE integration or STM32CubeMX Makefile"))
 }
 
-async fn build_scons(path: &Path) -> Result<(String, String)> {
+pub async fn build_scons_original(path: &Path) -> Result<BuildResult> {
+    let start_time = Instant::now();
     let output = Command::new("scons")
         .current_dir(path)
         .stdout(Stdio::piped())
@@ -354,5 +352,5 @@ async fn build_scons(path: &Path) -> Result<(String, String)> {
         .await
         .map_err(|_| anyhow!("Could not find SCons build output"))?;
     
-    Ok((binary_path.to_string_lossy().to_string(), "bin".to_string()))
+    Ok(create_build_result(binary_path.to_string_lossy().to_string(), "bin".to_string(), BuildSystem::SCons, start_time))
 }
