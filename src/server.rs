@@ -20,9 +20,6 @@ use tracing::{error, info};
 #[derive(Debug, Deserialize)]
 struct BuildParams {
     repo_url: String,
-    owner: String,
-    repo: String,
-    head_sha: String,
     installation_id: String,
     upload_url: String,
 }
@@ -47,18 +44,6 @@ impl Default for AppState {
     }
 }
 
-fn validate_owner_repo(s: &str) -> bool {
-    !s.is_empty() 
-        && s.len() <= 100 
-        && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
-
-fn validate_head_sha(s: &str) -> bool {
-    s.len() >= 7 
-        && s.len() <= 40 
-        && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 fn validate_repo_url(url: &str) -> bool {
     url.starts_with("https://github.com/") && url.len() > 19 && url.len() <= 200
 }
@@ -66,18 +51,6 @@ fn validate_repo_url(url: &str) -> bool {
 fn validate_params(params: &BuildParams) -> Result<()> {
     if !validate_repo_url(&params.repo_url) {
         return Err(anyhow!("Invalid repo_url - must be a GitHub repository URL"));
-    }
-    
-    if !validate_owner_repo(&params.owner) {
-        return Err(anyhow!("Invalid owner"));
-    }
-    
-    if !validate_owner_repo(&params.repo) {
-        return Err(anyhow!("Invalid repo"));
-    }
-    
-    if !validate_head_sha(&params.head_sha) {
-        return Err(anyhow!("Invalid head_sha"));
     }
     
     let installation_id: u64 = params.installation_id.parse()
@@ -114,7 +87,7 @@ async fn setup_workspace() -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-async fn fetch_and_extract_repository(repo_url: &str, head_sha: &str, workspace: &Path) -> Result<std::path::PathBuf> {
+async fn fetch_and_extract_repository(repo_url: &str, workspace: &Path) -> Result<std::path::PathBuf> {
     // Extract owner/repo from GitHub URL
     let url_parts: Vec<&str> = repo_url.trim_end_matches('/').split('/').collect();
     if url_parts.len() < 5 {
@@ -124,8 +97,8 @@ async fn fetch_and_extract_repository(repo_url: &str, head_sha: &str, workspace:
     let owner = url_parts[url_parts.len() - 2];
     let repo = url_parts[url_parts.len() - 1];
     
-    // Use GitHub's archive API to get tarball - more efficient than zipball for shallow fetch
-    let archive_url = format!("https://github.com/{}/{}/archive/{}.tar.gz", owner, repo, head_sha);
+    // Use GitHub's archive API to get tarball from main branch
+    let archive_url = format!("https://github.com/{}/{}/archive/main.tar.gz", owner, repo);
     
     info!("Fetching repository archive from: {}", archive_url);
     
@@ -208,15 +181,23 @@ async fn package_artifact(artifact_path: &str, workspace: &Path) -> Result<std::
 }
 
 async fn upload_artifact(zip_path: &Path, params: &BuildParams) -> Result<()> {
+    // Extract owner/repo from GitHub URL
+    let url_parts: Vec<&str> = params.repo_url.trim_end_matches('/').split('/').collect();
+    if url_parts.len() < 5 {
+        return Err(anyhow!("Invalid GitHub repository URL format"));
+    }
+    
+    let owner = url_parts[url_parts.len() - 2];
+    let repo = url_parts[url_parts.len() - 1];
+    
     // URL encode parameters
-    let owner = urlencoding::encode(&params.owner);
-    let repo = urlencoding::encode(&params.repo);
-    let head_sha = urlencoding::encode(&params.head_sha);
+    let owner_encoded = urlencoding::encode(owner);
+    let repo_encoded = urlencoding::encode(repo);
     let installation_id = urlencoding::encode(&params.installation_id);
 
     let upload_url = format!(
-        "{}?owner={}&repo={}&head_sha={}&installation_id={}",
-        params.upload_url, owner, repo, head_sha, installation_id
+        "{}?owner={}&repo={}&installation_id={}",
+        params.upload_url, owner_encoded, repo_encoded, installation_id
     );
 
     // Read the ZIP file
@@ -263,7 +244,7 @@ async fn build_handler(
         ));
     }
 
-    info!("Build request: {} @ {}", params.repo_url, params.head_sha);
+    info!("Build request: {}", params.repo_url);
 
     // Execute build
     match execute_build_pipeline(&params).await {
@@ -294,7 +275,7 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<String> {
     output_log.push(format!("Workspace ready: {}", workspace.display()));
 
     // Fetch and extract repository from GitHub
-    let repo_dir = fetch_and_extract_repository(&params.repo_url, &params.head_sha, &workspace).await?;
+    let repo_dir = fetch_and_extract_repository(&params.repo_url, &workspace).await?;
     output_log.push(format!("Repository fetched and extracted to: {}", repo_dir.display()));
 
     // Detect build system
