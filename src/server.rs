@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::Json,
-    routing::post,
+    routing::{get, post},
     Router,
 };
-use crate::{detection, execution};
+use crate::{detection, execution, jobs::{BuildJob, JobManager, JobStatus}};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -14,12 +14,11 @@ use tokio::fs;
 use tokio::process::Command;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
-use tower_http::timeout::TimeoutLayer;
-use std::time::Duration;
 use tracing::{error, info};
+use uuid::Uuid;
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct BuildParams {
     archive_url: String,
     owner: String,
@@ -31,20 +30,42 @@ struct BuildParams {
 #[derive(Debug, Serialize)]
 struct BuildResponse {
     status: String,
+    job_id: Uuid,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JobStatusResponse {
+    job_id: Uuid,
+    status: JobStatus,
+    created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobListResponse {
+    jobs: Vec<JobStatusResponse>,
 }
 
 #[derive(Clone)]
 struct AppState {
-    // Add any shared state here if needed
+    job_manager: JobManager,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self {}
+        Self {
+            job_manager: JobManager::new(),
+        }
     }
 }
 
@@ -220,7 +241,7 @@ async fn upload_artifact(zip_path: &Path, params: &BuildParams) -> Result<()> {
 }
 
 async fn build_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(params): Query<BuildParams>,
 ) -> Result<Json<BuildResponse>, (StatusCode, Json<BuildResponse>)> {
     // Validate parameters
@@ -229,36 +250,143 @@ async fn build_handler(
             StatusCode::BAD_REQUEST,
             Json(BuildResponse {
                 status: "error".to_string(),
-                output: None,
-                error: Some(format!("invalid query params: {}", e)),
+                job_id: Uuid::nil(),
+                message: format!("invalid query params: {}", e),
             }),
         ));
     }
 
     info!("Build request: {}/{} from {}", params.owner, params.repo, params.archive_url);
 
-    // Execute build
-    match execute_build_pipeline(&params).await {
-        Ok(output) => Ok(Json(BuildResponse {
-            status: "accepted".to_string(),
-            output: Some(output),
-            error: None,
+    // Create new job
+    let job = BuildJob::new(
+        params.archive_url.clone(),
+        params.owner.clone(),
+        params.repo.clone(),
+        params.installation_id.clone(),
+        params.upload_url.clone(),
+    );
+
+    let job_id = job.id;
+    let job_manager = state.job_manager.clone();
+
+    // Submit job to queue
+    job_manager.submit_job(job);
+
+    // Start async build task
+    let build_params = params.clone();
+    let task_job_manager = job_manager.clone();
+    let handle = tokio::spawn(async move {
+        execute_build_task(task_job_manager, job_id, build_params).await;
+    });
+
+    // Store the task handle
+    if let Err(e) = job_manager.start_job(&job_id, handle) {
+        error!("Failed to start job: {}", e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BuildResponse {
+                status: "error".to_string(),
+                job_id: Uuid::nil(),
+                message: "Failed to start build job".to_string(),
+            }),
+        ));
+    }
+
+    Ok(Json(BuildResponse {
+        status: "accepted".to_string(),
+        job_id,
+        message: "Build job submitted successfully".to_string(),
+    }))
+}
+
+async fn job_status_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<Uuid>,
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<serde_json::Value>)> {
+    match state.job_manager.get_job(&job_id) {
+        Some(job) => Ok(Json(JobStatusResponse {
+            job_id: job.id,
+            status: job.status,
+            created_at: job.created_at,
+            started_at: job.started_at,
+            completed_at: job.completed_at,
+            output: job.output,
+            error: job.error,
+            artifact_path: job.artifact_path,
         })),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Job not found",
+                "job_id": job_id
+            })),
+        )),
+    }
+}
+
+async fn job_list_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<JobListResponse> {
+    let jobs = state.job_manager.list_jobs();
+    let job_responses: Vec<JobStatusResponse> = jobs
+        .into_iter()
+        .map(|job| JobStatusResponse {
+            job_id: job.id,
+            status: job.status,
+            created_at: job.created_at,
+            started_at: job.started_at,
+            completed_at: job.completed_at,
+            output: job.output,
+            error: job.error,
+            artifact_path: job.artifact_path,
+        })
+        .collect();
+
+    Json(JobListResponse {
+        jobs: job_responses,
+    })
+}
+
+async fn job_cancel_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.job_manager.cancel_job(&job_id) {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "message": "Job cancelled successfully",
+            "job_id": job_id
+        }))),
+        Err(e) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Failed to cancel job: {}", e),
+                "job_id": job_id
+            })),
+        )),
+    }
+}
+
+async fn execute_build_task(job_manager: JobManager, job_id: Uuid, params: BuildParams) {
+    match execute_build_pipeline(&params).await {
+        Ok((output, artifact_path)) => {
+            // Build succeeded
+            let _ = job_manager.update_job(&job_id, |job| {
+                job.complete(output, Some(artifact_path));
+            });
+        }
         Err(e) => {
-            error!("Build failed: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(BuildResponse {
-                    status: "error".to_string(),
-                    output: None,
-                    error: Some(format!("build failed: {}", e)),
-                }),
-            ))
+            // Build failed
+            let error_msg = e.to_string();
+            error!("Build job {} failed: {}", job_id, error_msg);
+            let _ = job_manager.update_job(&job_id, |job| {
+                job.fail(error_msg);
+            });
         }
     }
 }
 
-async fn execute_build_pipeline(params: &BuildParams) -> Result<String> {
+async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String)> {
     let mut output_log = Vec::new();
     
     // Setup workspace
@@ -304,7 +432,7 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<String> {
         full_output
     };
 
-    Ok(tail)
+    Ok((tail, artifact_path))
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -320,10 +448,12 @@ pub fn create_app() -> Router {
 
     Router::new()
         .route("/build", post(build_handler))
-        .route("/health", axum::routing::get(health_handler))
+        .route("/jobs/:job_id", get(job_status_handler))
+        .route("/jobs/:job_id/cancel", post(job_cancel_handler))
+        .route("/jobs", get(job_list_handler))
+        .route("/health", get(health_handler))
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::new(Duration::from_secs(600))) // 10 minute timeout
                 .layer(CorsLayer::permissive())
                 .into_inner(),
         )
