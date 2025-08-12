@@ -51,19 +51,9 @@ fi
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# Install Python tools using virtual environment to avoid system package conflicts
-echo "Creating Python virtual environment..."
-python3 -m venv /opt/python-venv
-source /opt/python-venv/bin/activate
-
-# Upgrade pip in the virtual environment
-pip install --upgrade pip setuptools wheel
-
-# Install required Python packages
-pip install click colorama platformio west scons
-
-# Make the virtual environment available globally
-echo 'source /opt/python-venv/bin/activate' >> /etc/profile
+# Install Python tools
+pip3 install --break-system-packages --upgrade pip setuptools wheel
+pip3 install --break-system-packages platformio west scons
 
 # Update PlatformIO and install common platforms
 pio upgrade
