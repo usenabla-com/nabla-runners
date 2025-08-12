@@ -60,7 +60,7 @@ source /opt/python-venv/bin/activate
 pip install --upgrade pip setuptools wheel
 
 # Install required Python packages
-pip install --force-reinstall platformio west scons
+pip install platformio west scons
 
 # Make the virtual environment available globally
 echo 'source /opt/python-venv/bin/activate' >> /etc/profile
