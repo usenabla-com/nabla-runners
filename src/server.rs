@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::{Path as AxumPath, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
-use crate::{detection, execution, jobs::{BuildJob, JobManager, JobStatus}};
+use crate::{detection, execution, jobs::{BuildJob, SingleJobManager}};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use std::env;
 use std::collections::HashSet;
+use base64::Engine;
 
 
 #[derive(Debug, Deserialize, Clone)]
@@ -26,7 +27,6 @@ struct BuildParams {
     owner: String,
     repo: String,
     installation_id: String,
-    upload_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,31 +34,14 @@ struct BuildResponse {
     status: String,
     job_id: Uuid,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_data: Option<String>, // Base64 encoded binary
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_output: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct JobStatusResponse {
-    job_id: Uuid,
-    status: JobStatus,
-    created_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    started_at: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    completed_at: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    artifact_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    customer_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct JobListResponse {
-    jobs: Vec<JobStatusResponse>,
-}
 
 #[derive(Debug, Clone)]
 struct CustomerConfig {
@@ -105,14 +88,14 @@ impl CustomerConfig {
 
 #[derive(Clone)]
 struct AppState {
-    job_manager: JobManager,
+    job_manager: Arc<std::sync::RwLock<SingleJobManager>>,
     customer_config: CustomerConfig,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            job_manager: JobManager::new(),
+            job_manager: Arc::new(std::sync::RwLock::new(SingleJobManager::new())),
             customer_config: CustomerConfig::from_env(),
         }
     }
@@ -142,9 +125,6 @@ fn validate_params(params: &BuildParams) -> Result<()> {
         return Err(anyhow!("Installation ID must be positive"));
     }
     
-    if params.upload_url.is_empty() {
-        return Err(anyhow!("Upload URL is required"));
-    }
     
     Ok(())
 }
@@ -221,74 +201,6 @@ async fn fetch_and_extract_repository(archive_url: &str, workspace: &Path) -> Re
 }
 
 
-async fn package_artifact(artifact_path: &str, workspace: &Path) -> Result<std::path::PathBuf> {
-    let artifact_path = Path::new(artifact_path);
-    let out_dir = workspace.join("out");
-    let artifact_name = artifact_path.file_name()
-        .ok_or_else(|| anyhow!("Invalid artifact path"))?;
-
-    // Copy artifact to output directory
-    let dest_path = out_dir.join(artifact_name);
-    fs::copy(artifact_path, &dest_path).await?;
-
-    // Create ZIP archive
-    let zip_path = workspace.join("artifact.zip");
-    let output = Command::new("zip")
-        .arg("-q")
-        .arg(&zip_path)
-        .arg(artifact_name)
-        .current_dir(&out_dir)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Failed to create ZIP: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    Ok(zip_path)
-}
-
-async fn upload_artifact(zip_path: &Path, params: &BuildParams) -> Result<()> {
-    // URL encode parameters
-    let owner_encoded = urlencoding::encode(&params.owner);
-    let repo_encoded = urlencoding::encode(&params.repo);
-    let installation_id = urlencoding::encode(&params.installation_id);
-
-    let upload_url = format!(
-        "{}?owner={}&repo={}&installation_id={}",
-        params.upload_url, owner_encoded, repo_encoded, installation_id
-    );
-
-    // Read the ZIP file
-    let zip_data = fs::read(zip_path).await?;
-
-    // Create HTTP client
-    let client = reqwest::Client::new();
-    
-    // Send request
-    let response = client
-        .post(&upload_url)
-        .header("Content-Type", "application/zip")
-        .body(zip_data)
-        .send()
-        .await?;
-
-    let status = response.status();
-
-    if !status.is_success() {
-        let error_body = response.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "Upload failed with status {}: {}",
-            status,
-            error_body
-        ));
-    }
-
-    Ok(())
-}
 
 async fn build_handler(
     State(state): State<Arc<AppState>>,
@@ -302,6 +214,9 @@ async fn build_handler(
                 status: "error".to_string(),
                 job_id: Uuid::nil(),
                 message: format!("invalid query params: {}", e),
+                artifact_data: None,
+                artifact_filename: None,
+                build_output: None,
             }),
         ));
     }
@@ -314,6 +229,9 @@ async fn build_handler(
                 status: "error".to_string(),
                 job_id: Uuid::nil(),
                 message: format!("Installation ID {} not allowed for this customer", params.installation_id),
+                artifact_data: None,
+                artifact_filename: None,
+                build_output: None,
             }),
         ));
     }
@@ -328,147 +246,62 @@ async fn build_handler(
         params.owner.clone(),
         params.repo.clone(),
         params.installation_id.clone(),
-        params.upload_url.clone(),
+        String::new(), // No upload_url needed anymore
         Some(state.customer_config.customer_id.clone()),
     );
 
     let job_id = job.id;
-    let job_manager = state.job_manager.clone();
+    
+    // Set the single job
+    state.job_manager.write().unwrap().set_job(job);
 
-    // Submit job to queue
-    job_manager.submit_job(job);
-
-    // Start async build task
-    let build_params = params.clone();
-    let task_job_manager = job_manager.clone();
-    let handle = tokio::spawn(async move {
-        execute_build_task(task_job_manager, job_id, build_params).await;
-    });
-
-    // Store the task handle
-    if let Err(e) = job_manager.start_job(&job_id, handle) {
-        error!("Failed to start job: {}", e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(BuildResponse {
-                status: "error".to_string(),
-                job_id: Uuid::nil(),
-                message: "Failed to start build job".to_string(),
-            }),
-        ));
-    }
-
-    Ok(Json(BuildResponse {
-        status: "accepted".to_string(),
-        job_id,
-        message: "Build job submitted successfully".to_string(),
-    }))
-}
-
-async fn job_status_handler(
-    State(state): State<Arc<AppState>>,
-    AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<JobStatusResponse>, (StatusCode, Json<serde_json::Value>)> {
-    match state.job_manager.get_job(&job_id) {
-        Some(job) => Ok(Json(JobStatusResponse {
-            job_id: job.id,
-            status: job.status,
-            created_at: job.created_at,
-            started_at: job.started_at,
-            completed_at: job.completed_at,
-            output: job.output,
-            error: job.error,
-            artifact_path: job.artifact_path,
-            customer_name: job.customer_name,
-        })),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "Job not found",
-                "job_id": job_id
-            })),
-        )),
-    }
-}
-
-async fn job_list_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<JobListResponse> {
-    let jobs = state.job_manager.list_jobs();
-    let job_responses: Vec<JobStatusResponse> = jobs
-        .into_iter()
-        .map(|job| JobStatusResponse {
-            job_id: job.id,
-            status: job.status,
-            created_at: job.created_at,
-            started_at: job.started_at,
-            completed_at: job.completed_at,
-            output: job.output,
-            error: job.error,
-            artifact_path: job.artifact_path,
-            customer_name: job.customer_name,
-        })
-        .collect();
-
-    Json(JobListResponse {
-        jobs: job_responses,
-    })
-}
-
-async fn job_cancel_handler(
-    State(state): State<Arc<AppState>>,
-    AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match state.job_manager.cancel_job(&job_id) {
-        Ok(()) => Ok(Json(serde_json::json!({
-            "message": "Job cancelled successfully",
-            "job_id": job_id
-        }))),
-        Err(e) => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": format!("Failed to cancel job: {}", e),
-                "job_id": job_id
-            })),
-        )),
-    }
-}
-
-async fn execute_build_task(job_manager: JobManager, job_id: Uuid, params: BuildParams) {
-    let mut workspace_to_cleanup: Option<std::path::PathBuf> = None;
+    // Execute build task synchronously and return result
+    info!("Starting build job {}", job_id);
+    
+    // Update job status to running
+    state.job_manager.write().unwrap().update_job(|job| job.start());
     
     match execute_build_pipeline(&params).await {
-        Ok((output, artifact_path, workspace)) => {
+        Ok((output, artifact_base64, artifact_filename, _workspace)) => {
             // Build succeeded
-            workspace_to_cleanup = Some(workspace);
-            let _ = job_manager.update_job(&job_id, |job| {
-                job.complete(output, Some(artifact_path));
+            info!("Build job {} completed successfully", job_id);
+            state.job_manager.write().unwrap().update_job(|job| {
+                job.complete(output.clone(), Some(artifact_filename.clone()));
             });
+            
+            Ok(Json(BuildResponse {
+                status: "completed".to_string(),
+                job_id,
+                message: "Build completed successfully".to_string(),
+                artifact_data: Some(artifact_base64),
+                artifact_filename: Some(artifact_filename),
+                build_output: Some(output),
+            }))
         }
         Err(e) => {
-            // Build failed - try to extract workspace for cleanup
+            // Build failed
             let error_msg = e.to_string();
             error!("Build job {} failed: {}", job_id, error_msg);
             
-            // Try to extract workspace path from error context for cleanup
-            workspace_to_cleanup = get_workspace_for_cleanup().await;
-            
-            let _ = job_manager.update_job(&job_id, |job| {
-                job.fail(error_msg);
+            state.job_manager.write().unwrap().update_job(|job| {
+                job.fail(error_msg.clone());
             });
+            
+            Ok(Json(BuildResponse {
+                status: "failed".to_string(),
+                job_id,
+                message: format!("Build failed: {}", error_msg),
+                artifact_data: None,
+                artifact_filename: None,
+                build_output: Some(error_msg),
+            }))
         }
     }
-    
-    // Always cleanup workspace after job completes
-    if let Some(workspace) = workspace_to_cleanup {
-        cleanup_workspace(&workspace).await;
-    }
-    
-    // Additional system cleanup
-    cleanup_system_temp().await;
 }
 
-async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String, std::path::PathBuf)> {
+
+
+async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String, String, std::path::PathBuf)> {
     let mut output_log = Vec::new();
     
     // Setup workspace
@@ -498,15 +331,19 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String,
         .ok_or_else(|| anyhow!("Build succeeded but no artifact path returned"))?;
     output_log.push(format!("Build completed successfully. Artifact: {}", artifact_path));
 
-    // Package artifact
-    let packaged_artifact = package_artifact(&artifact_path, &workspace).await?;
-    output_log.push(format!("Artifact packaged: {}", packaged_artifact.display()));
+    // Read artifact and encode as base64
+    let artifact_bytes = fs::read(&artifact_path).await?;
+    let artifact_base64 = base64::engine::general_purpose::STANDARD.encode(&artifact_bytes);
+    output_log.push(format!("Artifact encoded to base64 ({} bytes)", artifact_bytes.len()));
 
-    // Upload artifact
-    upload_artifact(&packaged_artifact, params).await?;
-    output_log.push("Upload successful".to_string());
+    // Extract filename from path
+    let artifact_filename = Path::new(&artifact_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact.bin")
+        .to_string();
 
-    // Return last 4000 chars of logs to keep response small
+    // Return last 4000 chars of logs to keep response manageable
     let full_output = output_log.join("\n");
     let tail = if full_output.len() > 4000 {
         full_output.chars().skip(full_output.len() - 4000).collect()
@@ -514,68 +351,9 @@ async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String,
         full_output
     };
 
-    Ok((tail, artifact_path, workspace))
+    Ok((tail, artifact_base64, artifact_filename, workspace))
 }
 
-async fn get_workspace_for_cleanup() -> Option<std::path::PathBuf> {
-    // Try to determine workspace path for cleanup even when build fails
-    let workspace = if std::path::Path::new("/workspace").exists() {
-        std::path::PathBuf::from("/workspace")
-    } else {
-        std::env::temp_dir().join("nabla-workspace")
-    };
-    
-    if workspace.exists() {
-        Some(workspace)
-    } else {
-        None
-    }
-}
-
-async fn cleanup_workspace(workspace: &Path) {
-    info!("Cleaning up workspace: {}", workspace.display());
-    if let Err(e) = fs::remove_dir_all(workspace).await {
-        error!("Failed to cleanup workspace {}: {}", workspace.display(), e);
-    } else {
-        info!("Workspace cleaned up successfully: {}", workspace.display());
-    }
-}
-
-async fn cleanup_system_temp() {
-    info!("Performing system cleanup...");
-    
-    let cleanup_paths = vec![
-        "/tmp/nabla-*",
-        "/tmp/pio-*",
-        "/tmp/platformio-*",
-        "/tmp/cc*",
-        "/tmp/tmp*",
-    ];
-    
-    for pattern in cleanup_paths {
-        let _ = Command::new("sh")
-            .arg("-c")
-            .arg(format!("rm -rf {}", pattern))
-            .output()
-            .await;
-    }
-    
-    // Clean PlatformIO cache if it's getting too large (keep last 1GB)
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg("find /root/.platformio/.cache -type f -atime +1 -delete")
-        .output()
-        .await;
-    
-    // Clean old build directories in workspace
-    let _ = Command::new("sh")
-        .arg("-c") 
-        .arg("find /workspace -maxdepth 1 -type d -mtime +1 -exec rm -rf {} \\; 2>/dev/null || true")
-        .output()
-        .await;
-        
-    info!("System cleanup completed");
-}
 
 async fn health_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -590,9 +368,6 @@ pub fn create_app() -> Router {
 
     Router::new()
         .route("/build", post(build_handler))
-        .route("/jobs/:job_id", get(job_status_handler))
-        .route("/jobs/:job_id/cancel", post(job_cancel_handler))
-        .route("/jobs", get(job_list_handler))
         .route("/health", get(health_handler))
         .layer(
             ServiceBuilder::new()

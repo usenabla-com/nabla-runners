@@ -101,9 +101,9 @@ User=root
 WorkingDirectory=/opt/nabla-runners
 Environment="RUST_LOG=info"
 Environment="PORT=8080"
+Environment="CUSTOMER_ID=\${CUSTOMER_ID:-default}"
+Environment="ALLOWED_INSTALLATION_IDS=\${ALLOWED_INSTALLATION_IDS:-}"
 ExecStart=/opt/nabla-runners/target/release/nabla-runner
-Restart=always
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target

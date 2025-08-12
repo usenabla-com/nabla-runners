@@ -1,10 +1,5 @@
-use anyhow::Result;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,112 +94,45 @@ impl BuildJob {
     }
 }
 
-pub struct JobManager {
-    jobs: Arc<RwLock<HashMap<Uuid, BuildJob>>>,
-    handles: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
+pub struct SingleJobManager {
+    current_job: Option<BuildJob>,
 }
 
-impl Default for JobManager {
+impl Default for SingleJobManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl JobManager {
+impl SingleJobManager {
     pub fn new() -> Self {
         Self {
-            jobs: Arc::new(RwLock::new(HashMap::new())),
-            handles: Arc::new(RwLock::new(HashMap::new())),
+            current_job: None,
         }
     }
 
-    pub fn submit_job(&self, job: BuildJob) -> Uuid {
-        let job_id = job.id;
-        self.jobs.write().insert(job_id, job);
-        job_id
+    pub fn set_job(&mut self, job: BuildJob) {
+        self.current_job = Some(job);
     }
 
-    pub fn get_job(&self, job_id: &Uuid) -> Option<BuildJob> {
-        self.jobs.read().get(job_id).cloned()
+    pub fn get_job(&self) -> Option<&BuildJob> {
+        self.current_job.as_ref()
     }
 
-    pub fn update_job<F>(&self, job_id: &Uuid, update_fn: F) -> Result<()>
+    pub fn update_job<F>(&mut self, update_fn: F)
     where
         F: FnOnce(&mut BuildJob),
     {
-        let mut jobs = self.jobs.write();
-        if let Some(job) = jobs.get_mut(job_id) {
+        if let Some(job) = &mut self.current_job {
             update_fn(job);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Job not found: {}", job_id))
         }
-    }
-
-    pub fn start_job(&self, job_id: &Uuid, handle: JoinHandle<()>) -> Result<()> {
-        // Update job status to running
-        self.update_job(job_id, |job| job.start())?;
-        
-        // Store the task handle
-        self.handles.write().insert(*job_id, handle);
-        
-        Ok(())
-    }
-
-    pub fn list_jobs(&self) -> Vec<BuildJob> {
-        self.jobs.read().values().cloned().collect()
-    }
-
-    pub fn cleanup_completed_jobs(&self, max_age_seconds: u64) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let mut jobs_to_remove = Vec::new();
-        
-        {
-            let jobs = self.jobs.read();
-            for (id, job) in jobs.iter() {
-                if let Some(completed_at) = job.completed_at {
-                    if now - completed_at > max_age_seconds {
-                        jobs_to_remove.push(*id);
-                    }
-                }
-            }
-        }
-
-        let mut jobs = self.jobs.write();
-        let mut handles = self.handles.write();
-        
-        for job_id in jobs_to_remove {
-            jobs.remove(&job_id);
-            if let Some(handle) = handles.remove(&job_id) {
-                handle.abort();
-            }
-        }
-    }
-
-    pub fn cancel_job(&self, job_id: &Uuid) -> Result<()> {
-        // Cancel the task
-        if let Some(handle) = self.handles.write().remove(job_id) {
-            handle.abort();
-        }
-
-        // Update job status
-        self.update_job(job_id, |job| {
-            job.fail("Job cancelled".to_string());
-        })?;
-
-        Ok(())
     }
 }
 
-impl Clone for JobManager {
+impl Clone for SingleJobManager {
     fn clone(&self) -> Self {
         Self {
-            jobs: self.jobs.clone(),
-            handles: self.handles.clone(),
+            current_job: self.current_job.clone(),
         }
     }
 }
