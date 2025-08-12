@@ -52,7 +52,10 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Install Python tools
-pip3 install --break-system-packages --upgrade pip setuptools wheel
+# Handle pip upgrade carefully to avoid Debian package conflicts
+python3 -m pip install --break-system-packages --upgrade pip setuptools wheel || {
+    echo "Warning: pip upgrade failed, continuing with system pip"
+}
 pip3 install --break-system-packages platformio west scons
 
 # Update PlatformIO and install common platforms
