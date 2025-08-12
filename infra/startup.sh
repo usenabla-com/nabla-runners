@@ -53,63 +53,88 @@ export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v uv &> /dev/null; then
     echo "Installing UV..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    source "$HOME/.local/bin/env"
+    # Source the UV environment
+    export PATH="$HOME/.local/bin:$PATH"
 else
     echo "UV already installed"
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# Add UV to PATH for all users
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/profile
-export PATH="$HOME/.local/bin:$PATH"
+# Add UV to PATH for all users (only if not already added)
+if ! grep -q "/.local/bin" /etc/profile; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/profile
+fi
 
-# Clean up any previous UV tool installations of platformio
-echo "Cleaning up previous installations..."
-uv tool uninstall platformio 2>/dev/null || true
-uv tool uninstall west 2>/dev/null || true
-uv tool uninstall scons 2>/dev/null || true
-rm -rf /root/.local/share/uv/tools/platformio 2>/dev/null || true
-rm -rf /root/.local/share/uv/tools/west 2>/dev/null || true
-rm -rf /root/.local/share/uv/tools/scons 2>/dev/null || true
+# Create a dedicated Python environment for embedded development tools
+echo "Setting up Python environment for embedded tools..."
 
-# Create a virtual environment for PlatformIO with UV
-echo "Setting up PlatformIO environment with UV..."
-# Remove old environment if it exists
-rm -rf /opt/platformio-env 2>/dev/null || true
+# Remove any existing environment to ensure clean installation
+rm -rf /opt/embedded-tools-env 2>/dev/null || true
 
-# PlatformIO needs pip in its environment, so we'll create a dedicated venv
-uv venv /opt/platformio-env --python python3
-source /opt/platformio-env/bin/activate
+# Create virtual environment using UV (much faster than python -m venv)
+uv venv /opt/embedded-tools-env --python python3
 
-# Install pip and essential packages in the venv (PlatformIO requires it)
-uv pip install --python /opt/platformio-env/bin/python pip setuptools wheel
+# Install pip and core packages in the environment
+echo "Installing core Python packages..."
+/opt/embedded-tools-env/bin/python -m ensurepip --upgrade 2>/dev/null || \
+    uv pip install --python /opt/embedded-tools-env/bin/python pip
 
-# Install PlatformIO and other tools in the venv
-uv pip install --python /opt/platformio-env/bin/python platformio west scons
+# Upgrade pip and install setuptools/wheel
+uv pip install --python /opt/embedded-tools-env/bin/python --upgrade pip setuptools wheel
 
-# Create symlinks for global access (remove old ones first)
-rm -f /usr/local/bin/pio /usr/local/bin/platformio /usr/local/bin/west /usr/local/bin/scons
-ln -sf /opt/platformio-env/bin/pio /usr/local/bin/pio
-ln -sf /opt/platformio-env/bin/platformio /usr/local/bin/platformio
-ln -sf /opt/platformio-env/bin/west /usr/local/bin/west
-ln -sf /opt/platformio-env/bin/scons /usr/local/bin/scons
+# Install embedded development tools
+echo "Installing PlatformIO, West, and SCons..."
+uv pip install --python /opt/embedded-tools-env/bin/python platformio west scons
 
-# Ensure PlatformIO uses the correct Python with pip
+# Create global command shortcuts
+echo "Setting up global commands..."
+cat > /usr/local/bin/pio << 'EOF'
+#!/bin/bash
+export PLATFORMIO_PYTHON_EXE=/opt/embedded-tools-env/bin/python
 export PLATFORMIO_CORE_DIR=/opt/platformio-core
-export PLATFORMIO_PYTHON_EXE=/opt/platformio-env/bin/python
+exec /opt/embedded-tools-env/bin/pio "$@"
+EOF
 
-# Update PlatformIO and install common platforms
-echo "Configuring PlatformIO platforms..."
-/opt/platformio-env/bin/python -m pip install --upgrade pip
-/opt/platformio-env/bin/pio pkg update --global || true
-/opt/platformio-env/bin/pio pkg install --global --platform espressif32
-/opt/platformio-env/bin/pio pkg install --global --platform atmelavr
+cat > /usr/local/bin/platformio << 'EOF'
+#!/bin/bash
+export PLATFORMIO_PYTHON_EXE=/opt/embedded-tools-env/bin/python
+export PLATFORMIO_CORE_DIR=/opt/platformio-core
+exec /opt/embedded-tools-env/bin/platformio "$@"
+EOF
 
-# Deactivate the virtual environment
-deactivate
+cat > /usr/local/bin/west << 'EOF'
+#!/bin/bash
+exec /opt/embedded-tools-env/bin/west "$@"
+EOF
 
-# Add PlatformIO environment variables to profile
-echo 'export PLATFORMIO_CORE_DIR=/opt/platformio-core' >> /etc/profile
-echo 'export PLATFORMIO_PYTHON_EXE=/opt/platformio-env/bin/python' >> /etc/profile
+cat > /usr/local/bin/scons << 'EOF'
+#!/bin/bash
+exec /opt/embedded-tools-env/bin/scons "$@"
+EOF
+
+# Make wrapper scripts executable
+chmod +x /usr/local/bin/pio /usr/local/bin/platformio /usr/local/bin/west /usr/local/bin/scons
+
+# Set up PlatformIO
+echo "Configuring PlatformIO..."
+export PLATFORMIO_PYTHON_EXE=/opt/embedded-tools-env/bin/python
+export PLATFORMIO_CORE_DIR=/opt/platformio-core
+
+# Update PlatformIO core
+/usr/local/bin/pio pkg update --global || true
+
+# Install common platforms
+echo "Installing PlatformIO platforms..."
+/usr/local/bin/pio pkg install --global --platform espressif32
+/usr/local/bin/pio pkg install --global --platform atmelavr
+
+# Add PlatformIO environment variables to profile (if not already there)
+if ! grep -q "PLATFORMIO_CORE_DIR" /etc/profile; then
+    echo 'export PLATFORMIO_CORE_DIR=/opt/platformio-core' >> /etc/profile
+fi
+if ! grep -q "PLATFORMIO_PYTHON_EXE" /etc/profile; then
+    echo 'export PLATFORMIO_PYTHON_EXE=/opt/embedded-tools-env/bin/python' >> /etc/profile
+fi
 
 # Install ARM toolchain for STM32 and similar
 if [ ! -d "/opt/gcc-arm-none-eabi" ]; then
@@ -181,3 +206,5 @@ else
 fi
 
 echo "Nabla Runner setup completed at $(date)"
+echo "PlatformIO Python: $PLATFORMIO_PYTHON_EXE"
+echo "PlatformIO Core Dir: $PLATFORMIO_CORE_DIR"
