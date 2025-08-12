@@ -18,6 +18,7 @@ apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    libffi-dev \
     cmake \
     ninja-build \
     make \
@@ -61,20 +62,32 @@ fi
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.local/bin:$PATH"
 
-# Install Python tools using UV
-echo "Installing Python tools with UV..."
-# UV handles virtual environments automatically and is much faster than pip
-uv tool install platformio
-uv tool install west
-uv tool install scons
+# Create a virtual environment for PlatformIO with UV
+echo "Setting up PlatformIO environment with UV..."
+# PlatformIO needs pip in its environment, so we'll create a dedicated venv
+uv venv /opt/platformio-env --python 3.11
+source /opt/platformio-env/bin/activate
 
-# Make tools available in PATH
-export PATH="$HOME/.local/bin:$PATH"
+# Install pip in the venv (PlatformIO requires it)
+uv pip install --python /opt/platformio-env/bin/python pip setuptools wheel
+
+# Install PlatformIO and other tools in the venv
+uv pip install --python /opt/platformio-env/bin/python platformio west scons
+
+# Create symlinks for global access
+ln -sf /opt/platformio-env/bin/pio /usr/local/bin/pio
+ln -sf /opt/platformio-env/bin/platformio /usr/local/bin/platformio
+ln -sf /opt/platformio-env/bin/west /usr/local/bin/west
+ln -sf /opt/platformio-env/bin/scons /usr/local/bin/scons
 
 # Update PlatformIO and install common platforms
-pio upgrade
-pio platform install espressif32
-pio platform install atmelavr
+echo "Configuring PlatformIO platforms..."
+/opt/platformio-env/bin/pio upgrade || true
+/opt/platformio-env/bin/pio platform install espressif32
+/opt/platformio-env/bin/pio platform install atmelavr
+
+# Deactivate the virtual environment
+deactivate
 
 # Install ARM toolchain for STM32 and similar
 if [ ! -d "/opt/gcc-arm-none-eabi" ]; then
