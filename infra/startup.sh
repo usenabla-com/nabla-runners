@@ -52,7 +52,8 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # Install Python tools
-pip3 install --break-system-packages --upgrade pip setuptools wheel
+# Use --force-reinstall to handle system-installed pip
+pip3 install --break-system-packages --force-reinstall --upgrade pip setuptools wheel
 pip3 install --break-system-packages platformio west scons
 
 # Update PlatformIO and install common platforms
