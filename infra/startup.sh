@@ -24,11 +24,8 @@ apt-get install -y \
     gcc \
     g++ \
     python3 \
-    python3-pip \
     python3-venv \
     python3-dev \
-    python3-setuptools \
-    python3-wheel \
     device-tree-compiler \
     file \
     unzip \
@@ -51,10 +48,28 @@ fi
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# Install Python tools
-# Use --force-reinstall to handle system-installed pip
-pip3 install --break-system-packages --force-reinstall --upgrade pip setuptools wheel
-pip3 install --break-system-packages platformio west scons
+# Install UV - the fast Python package manager
+if ! command -v uv &> /dev/null; then
+    echo "Installing UV..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
+else
+    echo "UV already installed"
+fi
+
+# Add UV to PATH for all users
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/profile
+export PATH="$HOME/.local/bin:$PATH"
+
+# Install Python tools using UV
+echo "Installing Python tools with UV..."
+# UV handles virtual environments automatically and is much faster than pip
+uv tool install platformio
+uv tool install west
+uv tool install scons
+
+# Make tools available in PATH
+export PATH="$HOME/.local/bin:$PATH"
 
 # Update PlatformIO and install common platforms
 pio upgrade
