@@ -62,32 +62,54 @@ fi
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> /etc/profile
 export PATH="$HOME/.local/bin:$PATH"
 
+# Clean up any previous UV tool installations of platformio
+echo "Cleaning up previous installations..."
+uv tool uninstall platformio 2>/dev/null || true
+uv tool uninstall west 2>/dev/null || true
+uv tool uninstall scons 2>/dev/null || true
+rm -rf /root/.local/share/uv/tools/platformio 2>/dev/null || true
+rm -rf /root/.local/share/uv/tools/west 2>/dev/null || true
+rm -rf /root/.local/share/uv/tools/scons 2>/dev/null || true
+
 # Create a virtual environment for PlatformIO with UV
 echo "Setting up PlatformIO environment with UV..."
+# Remove old environment if it exists
+rm -rf /opt/platformio-env 2>/dev/null || true
+
 # PlatformIO needs pip in its environment, so we'll create a dedicated venv
-uv venv /opt/platformio-env --python 3.11
+uv venv /opt/platformio-env --python python3
 source /opt/platformio-env/bin/activate
 
-# Install pip in the venv (PlatformIO requires it)
+# Install pip and essential packages in the venv (PlatformIO requires it)
 uv pip install --python /opt/platformio-env/bin/python pip setuptools wheel
 
 # Install PlatformIO and other tools in the venv
 uv pip install --python /opt/platformio-env/bin/python platformio west scons
 
-# Create symlinks for global access
+# Create symlinks for global access (remove old ones first)
+rm -f /usr/local/bin/pio /usr/local/bin/platformio /usr/local/bin/west /usr/local/bin/scons
 ln -sf /opt/platformio-env/bin/pio /usr/local/bin/pio
 ln -sf /opt/platformio-env/bin/platformio /usr/local/bin/platformio
 ln -sf /opt/platformio-env/bin/west /usr/local/bin/west
 ln -sf /opt/platformio-env/bin/scons /usr/local/bin/scons
 
+# Ensure PlatformIO uses the correct Python with pip
+export PLATFORMIO_CORE_DIR=/opt/platformio-core
+export PLATFORMIO_PYTHON_EXE=/opt/platformio-env/bin/python
+
 # Update PlatformIO and install common platforms
 echo "Configuring PlatformIO platforms..."
-/opt/platformio-env/bin/pio upgrade || true
-/opt/platformio-env/bin/pio platform install espressif32
-/opt/platformio-env/bin/pio platform install atmelavr
+/opt/platformio-env/bin/python -m pip install --upgrade pip
+/opt/platformio-env/bin/pio pkg update --global || true
+/opt/platformio-env/bin/pio pkg install --global --platform espressif32
+/opt/platformio-env/bin/pio pkg install --global --platform atmelavr
 
 # Deactivate the virtual environment
 deactivate
+
+# Add PlatformIO environment variables to profile
+echo 'export PLATFORMIO_CORE_DIR=/opt/platformio-core' >> /etc/profile
+echo 'export PLATFORMIO_PYTHON_EXE=/opt/platformio-env/bin/python' >> /etc/profile
 
 # Install ARM toolchain for STM32 and similar
 if [ ! -d "/opt/gcc-arm-none-eabi" ]; then
