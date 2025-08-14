@@ -165,6 +165,13 @@ fi
 echo "Building nabla-runner..."
 /root/.cargo/bin/cargo build --release
 
+# Read metadata from Google Cloud metadata server
+echo "Reading VM metadata..."
+CUSTOMER_ID=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/customer-id" -H "Metadata-Flavor: Google" || echo "default")
+ALLOWED_INSTALLATION_IDS=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/attributes/allowed-installation-ids" -H "Metadata-Flavor: Google" || echo "")
+
+echo "Retrieved metadata: CUSTOMER_ID=$CUSTOMER_ID, ALLOWED_INSTALLATION_IDS=$ALLOWED_INSTALLATION_IDS"
+
 # Create systemd service
 cat > /etc/systemd/system/nabla-runner.service <<EOF
 [Unit]
@@ -177,8 +184,8 @@ User=root
 WorkingDirectory=/opt/nabla-runners
 Environment="RUST_LOG=info"
 Environment="PORT=8080"
-Environment="CUSTOMER_ID=\${CUSTOMER_ID:-default}"
-Environment="ALLOWED_INSTALLATION_IDS=\${ALLOWED_INSTALLATION_IDS:-}"
+Environment="CUSTOMER_ID=$CUSTOMER_ID"
+Environment="ALLOWED_INSTALLATION_IDS=$ALLOWED_INSTALLATION_IDS"
 ExecStart=/opt/nabla-runners/target/release/nabla-runner
 
 [Install]
