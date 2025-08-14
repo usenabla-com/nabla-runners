@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use axum::{
-    extract::{Query, State},
+    extract::{Json as JsonExtract, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -23,10 +23,12 @@ use base64::Engine;
 
 #[derive(Debug, Deserialize, Clone)]
 struct BuildParams {
+    job_id: String,
     archive_url: String,
     owner: String,
     repo: String,
     installation_id: String,
+    build_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,7 +206,7 @@ async fn fetch_and_extract_repository(archive_url: &str, workspace: &Path) -> Re
 
 async fn build_handler(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<BuildParams>,
+    JsonExtract(params): JsonExtract<BuildParams>,
 ) -> Result<Json<BuildResponse>, (StatusCode, Json<BuildResponse>)> {
     // Validate parameters
     if let Err(e) = validate_params(&params) {
@@ -213,7 +215,7 @@ async fn build_handler(
             Json(BuildResponse {
                 status: "error".to_string(),
                 job_id: Uuid::nil(),
-                message: format!("invalid query params: {}", e),
+                message: format!("invalid request: {}", e),
                 artifact_data: None,
                 artifact_filename: None,
                 build_output: None,
