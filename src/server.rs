@@ -28,7 +28,6 @@ struct BuildParams {
     owner: String,
     repo: String,
     installation_id: String,
-    build_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,16 +130,14 @@ fn validate_params(params: &BuildParams) -> Result<()> {
     Ok(())
 }
 
-async fn setup_workspace() -> Result<std::path::PathBuf> {
-    // Create unique workspace per job to avoid conflicts
-    let job_id = Uuid::new_v4();
-    
+async fn setup_workspace(client_job_id: &str) -> Result<std::path::PathBuf> {
+    // Use client-provided job_id for workspace naming
     let workspace = if std::path::Path::new("/workspace").exists() {
-        std::path::PathBuf::from("/workspace").join(format!("job-{}", job_id))
+        std::path::PathBuf::from("/workspace").join(format!("job-{}", client_job_id))
     } else {
         // For local development, use a temp directory
         let temp_base = std::env::temp_dir().join("nabla-workspace");
-        temp_base.join(format!("job-{}", job_id))
+        temp_base.join(format!("job-{}", client_job_id))
     };
     
     // Create workspace directories
@@ -306,8 +303,8 @@ async fn build_handler(
 async fn execute_build_pipeline(params: &BuildParams) -> Result<(String, String, String, std::path::PathBuf)> {
     let mut output_log = Vec::new();
     
-    // Setup workspace
-    let workspace = setup_workspace().await?;
+    // Setup workspace using client job_id
+    let workspace = setup_workspace(&params.job_id).await?;
     output_log.push(format!("Workspace ready: {}", workspace.display()));
 
     // Fetch and extract repository from archive URL
