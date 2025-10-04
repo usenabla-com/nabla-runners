@@ -4,68 +4,52 @@ A containerized build service for firmware projects that supports multiple build
 
 ```mermaid
 architecture-beta
-    title FedRAMP Production Environment
+    title FedRAMP Production
 
-    %% Groups
-    group public[Public]
-    group application[Application]
-    group data[Data]
-    group shared[Shared]
+    group identity_plane[Identity]
+    group key_plane[Key Management]
+    group audit_plane[Audit]
+    group vpc_main[Prod VPC]
+    group app_tier[App Tier]
+    group default_vpc[Default VPC]
+    group external[External]
 
-    %% Shared Services
-    service aws_vpc_main(cloud)[VPC] in shared
-    service aws_kms_key_main_key(key)[KMS] in shared
-    service aws_iam_role_ec2_instance_role(user)[IAM Role] in shared
-    service aws_cloudwatch_log_group_application_logs(log)[CloudWatch] in shared
-    service aws_cloudtrail_main_trail(log)[CloudTrail] in shared
-    service aws_s3_bucket_backup_bucket(disk)[S3 Backup] in shared
+    service aws_iam_role_ec2_instance_role(logos:aws-iam)[EC2 Role] in identity_plane
+    service aws_kms_key_main_key(logos:aws-kms)[CMK] in key_plane
+    service aws_cloudwatch_log_group_application_logs(logos:aws-cloudwatch)[App Logs] in audit_plane
+    service aws_cloudtrail_main_trail(logos:aws-cloudtrail)[CloudTrail] in audit_plane
 
-    %% Public Zone
-    service aws_internet_gateway_main(internet)[IGW] in public
-    service aws_nat_gateway_main(gateway)[NAT GW] in public
-    service aws_subnet_public_a(cloud)[Public Subnet] in public
+    service aws_vpc_main(logos:aws-vpc)[Prod VPC] in external
+    service aws_subnet_private_app_a(logos:aws-subnet)[App Subnet] in vpc_main
+    service aws_subnet_private_db_a(logos:aws-subnet)[DB Subnet] in vpc_main
+    service aws_subnet_public_a(logos:aws-subnet)[Public Subnet] in vpc_main
+    service aws_internet_gateway_main(logos:aws-route53)[IGW] in vpc_main
+    service aws_nat_gateway_main(logos:aws-route53)[NAT] in default_vpc
 
-    %% Application Zone
-    service aws_subnet_private_app_a(cloud)[App Subnet] in application
-    service aws_security_group_web_tier(shield)[Web SG] in application
-    service aws_security_group_app_tier(shield)[App SG] in application
-    service aws_instance_web_server(server)[Web Server] in application
-    service aws_instance_app_server(server)[App Server] in application
+    service aws_security_group_web_tier(logos:aws-shield)[Web SG] in vpc_main
+    service aws_security_group_app_tier(logos:aws-shield)[App SG] in vpc_main
+    service aws_security_group_database_tier(logos:aws-shield)[DB SG] in vpc_main
 
-    %% Database Zone
-    service aws_subnet_private_db_a(cloud)[DB Subnet] in data
-    service aws_security_group_database_tier(shield)[DB SG] in data
-    service aws_db_instance_main_database(database)[PostgreSQL RDS] in data
+    service aws_instance_web_server(logos:aws-ec2)[Web Server] in app_tier
+    service aws_instance_app_server(logos:aws-ec2)[App Server] in app_tier
+    service aws_db_instance_main_database(logos:aws-rds)[Database] in app_tier
 
-    %% Relationships
-    aws_subnet_public_a:L -- R:aws_vpc_main
     aws_subnet_private_app_a:L -- R:aws_vpc_main
     aws_subnet_private_db_a:L -- R:aws_vpc_main
-
+    aws_subnet_public_a:L -- R:aws_vpc_main
     aws_internet_gateway_main:L -- R:aws_vpc_main
-
     aws_nat_gateway_main:L -- R:aws_subnet_public_a
-
-    aws_instance_web_server:L -- R:aws_subnet_private_app_a
-    aws_instance_web_server:L -- R:aws_security_group_web_tier
-    aws_instance_web_server:L -- R:aws_iam_role_ec2_instance_role
-
-    aws_instance_app_server:L -- R:aws_subnet_private_app_a
-    aws_instance_app_server:L -- R:aws_security_group_app_tier
-    aws_instance_app_server:L -- R:aws_iam_role_ec2_instance_role
-
-    aws_db_instance_main_database:L -- R:aws_subnet_private_db_a
-    aws_db_instance_main_database:L -- R:aws_security_group_database_tier
-    aws_db_instance_main_database:L -- R:aws_kms_key_main_key
-
-    aws_cloudwatch_log_group_application_logs:L -- R:aws_kms_key_main_key
-    aws_cloudtrail_main_trail:L -- R:aws_kms_key_main_key
-
-    aws_s3_bucket_backup_bucket:L -- R:aws_kms_key_main_key
-
     aws_security_group_web_tier:L -- R:aws_vpc_main
     aws_security_group_app_tier:L -- R:aws_vpc_main
     aws_security_group_database_tier:L -- R:aws_vpc_main
+    aws_instance_web_server:L -- R:aws_subnet_private_app_a
+    aws_instance_web_server:L -- R:aws_security_group_web_tier
+    aws_instance_app_server:L -- R:aws_subnet_private_app_a
+    aws_instance_app_server:L -- R:aws_security_group_app_tier
+    aws_db_instance_main_database:L -- R:aws_security_group_database_tier
+    aws_db_instance_main_database:L -- R:aws_kms_key_main_key
+    aws_cloudwatch_log_group_application_logs:L -- R:aws_kms_key_main_key
+    aws_cloudtrail_main_trail:L -- R:aws_kms_key_main_key
 ```
 
 ## Overview
