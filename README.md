@@ -4,52 +4,48 @@ A containerized build service for firmware projects that supports multiple build
 
 ```mermaid
 architecture-beta
-    title FedRAMP Production Environment - US-Gov Cloud (us-gov-west-1)
+    title FedRAMP Production Environment
 
-    %% ==================== Groups ====================
-    group public[Internet-Facing (Public)]
-    group application[Application Tier (Private)]
-    group data[Data Tier (Database)]
-    group shared[Shared Services & Security]
+    %% Groups
+    group public[Public]
+    group application[Application]
+    group data[Data]
+    group shared[Shared]
 
-    %% ==================== Shared Services ====================
-    service aws_vpc_main(cloud)[VPC 10.0.0.0/16] in shared
-    service aws_kms_key_main_key(key)[CMK - CUI Encryption] in shared
-    service aws_iam_role_ec2_instance_role(user)[EC2 Instance Role - Least-Privilege] in shared
-    service aws_cloudwatch_log_group_application_logs(log)[Application Log Group] in shared
-    service aws_cloudtrail_main_trail(log)[CloudTrail - Audit Trail] in shared
-    service aws_s3_bucket_backup_bucket(disk)[Backup S3 Bucket - Encrypted] in shared
+    %% Shared Services
+    service aws_vpc_main(cloud)[VPC] in shared
+    service aws_kms_key_main_key(key)[KMS] in shared
+    service aws_iam_role_ec2_instance_role(user)[IAM Role] in shared
+    service aws_cloudwatch_log_group_application_logs(log)[CloudWatch] in shared
+    service aws_cloudtrail_main_trail(log)[CloudTrail] in shared
+    service aws_s3_bucket_backup_bucket(disk)[S3 Backup] in shared
 
-    %% ==================== Public Zone ====================
-    service aws_internet_gateway_main(internet)[Internet Gateway] in public
-    service aws_nat_gateway_main(gateway)[NAT Gateway - Outbound Internet] in public
-    service aws_subnet_public_a(cloud)[Public Subnet 10.0.101.0/24] in public
+    %% Public Zone
+    service aws_internet_gateway_main(internet)[IGW] in public
+    service aws_nat_gateway_main(gateway)[NAT GW] in public
+    service aws_subnet_public_a(cloud)[Public Subnet] in public
 
-    %% ==================== Application Zone ====================
-    service aws_subnet_private_app_a(cloud)[Private App Subnet 10.0.1.0/24] in application
-    service aws_security_group_web_tier(shield)[Web SG - HTTPS Inbound] in application
-    service aws_security_group_app_tier(shield)[App SG - App-DB Traffic] in application
-    service aws_instance_web_server(server)[Web Server - FedRAMP Web] in application
-    service aws_instance_app_server(server)[App Server - FedRAMP App] in application
+    %% Application Zone
+    service aws_subnet_private_app_a(cloud)[App Subnet] in application
+    service aws_security_group_web_tier(shield)[Web SG] in application
+    service aws_security_group_app_tier(shield)[App SG] in application
+    service aws_instance_web_server(server)[Web Server] in application
+    service aws_instance_app_server(server)[App Server] in application
 
-    %% ==================== Database Zone ====================
-    service aws_subnet_private_db_a(cloud)[Private DB Subnet 10.0.3.0/24] in data
-    service aws_security_group_database_tier(shield)[DB SG - PostgreSQL Access] in data
-    service aws_db_instance_main_database(database)[PostgreSQL RDS - FedRAMP DB] in data
+    %% Database Zone
+    service aws_subnet_private_db_a(cloud)[DB Subnet] in data
+    service aws_security_group_database_tier(shield)[DB SG] in data
+    service aws_db_instance_main_database(database)[PostgreSQL RDS] in data
 
-    %% ==================== Relationships ====================
-    %% Subnet to VPC
+    %% Relationships
     aws_subnet_public_a:L -- R:aws_vpc_main
     aws_subnet_private_app_a:L -- R:aws_vpc_main
     aws_subnet_private_db_a:L -- R:aws_vpc_main
 
-    %% Internet Gateway to VPC
     aws_internet_gateway_main:L -- R:aws_vpc_main
 
-    %% NAT Gateway to Public Subnet
     aws_nat_gateway_main:L -- R:aws_subnet_public_a
 
-    %% EC2 to Subnet & SG & IAM Role
     aws_instance_web_server:L -- R:aws_subnet_private_app_a
     aws_instance_web_server:L -- R:aws_security_group_web_tier
     aws_instance_web_server:L -- R:aws_iam_role_ec2_instance_role
@@ -58,24 +54,18 @@ architecture-beta
     aws_instance_app_server:L -- R:aws_security_group_app_tier
     aws_instance_app_server:L -- R:aws_iam_role_ec2_instance_role
 
-    %% RDS to Subnet, SG & KMS
     aws_db_instance_main_database:L -- R:aws_subnet_private_db_a
     aws_db_instance_main_database:L -- R:aws_security_group_database_tier
     aws_db_instance_main_database:L -- R:aws_kms_key_main_key
 
-    %% Logging & Auditing to KMS
     aws_cloudwatch_log_group_application_logs:L -- R:aws_kms_key_main_key
     aws_cloudtrail_main_trail:L -- R:aws_kms_key_main_key
 
-    %% Backup Bucket to KMS
     aws_s3_bucket_backup_bucket:L -- R:aws_kms_key_main_key
 
-    %% Security Groups to VPC
     aws_security_group_web_tier:L -- R:aws_vpc_main
     aws_security_group_app_tier:L -- R:aws_vpc_main
     aws_security_group_database_tier:L -- R:aws_vpc_main
-
-    %% End of diagram
 ```
 
 ## Overview
